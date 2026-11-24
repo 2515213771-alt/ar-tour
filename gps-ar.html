@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>GPS 方块取景器</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#142126;color:white;font:16px/1.5 system-ui,sans-serif}video,#layer{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}video{object-fit:cover}main{position:relative;padding:14px;max-width:440px}section{background:#142126ed;border-radius:14px;padding:16px}h1{font-size:20px;margin:0 0 5px}p{font-size:14px;margin:6px 0}form{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}label{flex:1;min-width:90px;font-size:13px}input,button{font:inherit;border:0;border-radius:6px;padding:8px}input{display:block;width:100%;margin-top:4px}button{cursor:pointer;background:#c3eece;color:#172a23}#state{position:fixed;bottom:14px;left:14px;right:14px;text-align:center;background:#142126ec;border-radius:10px;padding:9px}
+</style>
+<video id="feed" autoplay playsinline muted></video><canvas id="layer"></canvas>
+<main><section><h1>GPS 方块取景器</h1><p>手机水平朝正北。输入目标坐标，或将目标设在当前位置正北 30 米。</p>
+<form id="coordinates"><label>目标经度<input id="lng" type="number" step="any" min="-180" max="180" required placeholder="−180 至 180"></label><label>目标纬度<input id="lat" type="number" step="any" min="-90" max="90" required placeholder="−90 至 90"></label><button>应用坐标</button></form>
+<p><button id="example" disabled>正北 30 米</button> <button id="start" disabled>开启取景</button></p></section></main><output id="state">正在加载 Three.js…</output>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+const el=id=>document.getElementById(id);
+const status=el('state');
+let THREE;
+try{THREE=await import('three')}catch{status.textContent='Three.js 加载失败，请联网后刷新。'}
+if(THREE)try{setup()}catch{status.textContent='无法初始化 3D 画布，请使用支持 WebGL 的浏览器。'}
+function setup(){
+ const R=6371008.8, rad=Math.PI/180;
+ const renderer=new THREE.WebGLRenderer({canvas:el('layer'),alpha:true,antialias:true});
+ renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+ const scene=new THREE.Scene();
+ // 相机朝 -Z（正北），+X 为正东，+Y 为竖直向上。假定目标与镜头等高。
+ // 60° 取水平视野，Three.js 接收垂直视野，需随窗口宽高比换算。
+ const camera=new THREE.PerspectiveCamera(60,1,0.05,21000000);
+ const cube=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshStandardMaterial({color:0xff2020,roughness:0.65}));
+ cube.rotation.set(.2,.48,0);scene.add(cube,new THREE.HemisphereLight(0xffffff,0x68504a,1.8));
+ const light=new THREE.DirectionalLight(0xffffff,2);light.position.set(-2,4,3);scene.add(light);
+ let live=false,seq=0,watch=null,stream=null,fix=null,target=null,camMessage='',gpsMessage='';
+ function draw(){
+  cube.visible=false;
+  let hint='';
+  if(live && fix && target){
+   const a=fix.latitude*rad,b=target.lat*rad,d=(target.lng-fix.longitude)*rad;
+   // 球面初始方位角 β 自正北顺时针；haversine 算地表距离，周期函数可跨越日期变更线。
+   const beta=Math.atan2(Math.sin(d)*Math.cos(b),Math.cos(a)*Math.sin(b)-Math.sin(a)*Math.cos(b)*Math.cos(d));
+   const h=Math.min(1,Math.sin((b-a)/2)**2+Math.cos(a)*Math.cos(b)*Math.sin(d/2)**2);
+   const distance=2*R*Math.asin(Math.sqrt(h));
+   // 根据距离与方位得到东、北分量，透视相机负责投影。中心点超出 ±30° 时隐藏方块。
+   cube.position.set(distance*Math.sin(beta),0,-distance*Math.cos(beta));
+   cube.visible=distance>.1 && Math.abs(beta)<=30*rad;
+   // 这是位置标记：按距离调节模型尺寸，使远处目标在手机上仍可辨认。
+   cube.scale.setScalar(distance*.045);
+   hint=distance<=.1?'已到目标坐标':(cube.visible?'目标在视野内':(Math.abs(beta)>Math.PI/2?'目标在身后':'目标在视野'+(beta>0?'右':'左')+'侧'))+' · '+Math.round(distance)+' 米';
+  }else if(live && fix)hint='请设置目标坐标';
+  renderer.render(scene,camera);
+  if(live)status.textContent=[camMessage,gpsMessage,hint].filter(Boolean).join(' ｜ ');
+ }
+ function resize(){camera.aspect=innerWidth/innerHeight;camera.fov=2*Math.atan(Math.tan(30*rad)/camera.aspect)/rad;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight,false);draw()}
+ function stop(){
+  live=false;seq++;if(watch!==null)navigator.geolocation.clearWatch(watch);watch=null;
+  stream?.getTracks().forEach(t=>t.stop());stream=null;el('feed').srcObject=null;fix=null;
+  el('example').disabled=true;el('start').textContent='开启取景';draw();status.textContent='取景已关闭';
+ }
+ el('start').onclick=async()=>{
+  if(live){stop();return}
+  if(!isSecureContext||!navigator.mediaDevices?.getUserMedia||!navigator.geolocation){status.textContent='请在支持相机和定位的浏览器中通过 HTTPS 或 localhost 打开。';return}
+  const token=++seq;live=true;camMessage='正在开启相机';gpsMessage='等待定位';el('start').textContent='关闭取景';draw();
+  watch=navigator.geolocation.watchPosition(p=>{if(token!==seq)return;fix=p.coords;gpsMessage='定位精度约 '+Math.round(fix.accuracy)+' 米';el('example').disabled=false;draw()},()=>{if(token!==seq)return;fix=null;el('example').disabled=true;gpsMessage='定位不可用，请检查位置权限';draw()},{enableHighAccuracy:true,maximumAge:0,timeout:15000});
+  try{const media=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},aspectRatio:{ideal:innerWidth/innerHeight}}});
+   if(token!==seq){media.getTracks().forEach(t=>t.stop());return}
+   stream=media;el('feed').srcObject=media;await el('feed').play();if(token!==seq)return;camMessage='实景取景';
+  }catch{if(token!==seq)return;stream?.getTracks().forEach(t=>t.stop());stream=null;el('feed').srcObject=null;camMessage='相机不可用 · 仅显示投影预览'}draw();
+ };
+ el('coordinates').onsubmit=e=>{e.preventDefault();target={lat:el('lat').valueAsNumber,lng:el('lng').valueAsNumber};draw();if(!live)status.textContent='目标已设置，请开启取景'};
+ el('example').onclick=()=>{if(!fix)return;const lat=fix.latitude+30/R/rad;if(lat>90){status.textContent='靠近北极，请手动输入目标。';return}el('lng').value=fix.longitude;el('lat').value=lat;el('coordinates').requestSubmit()};
+ addEventListener('resize',resize);addEventListener('pagehide',stop);document.addEventListener('visibilitychange',()=>{if(document.hidden&&live)stop()});resize();el('start').disabled=false;status.textContent='准备就绪';
+}
+</script></html>
